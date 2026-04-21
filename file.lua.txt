@@ -1,0 +1,903 @@
+--[[
+    LOCAL PLAYER AI CHATBOT
+    Features:
+    - Movable, toggleable GUI (mobile & PC)
+    - API key stored in GUI (persistent)
+    - Personality system (on/off, customizable)
+    - Chat memory/context
+    - Multiple HTTP methods supported
+    - Trigger word system
+    - Response delay settings
+]]
+
+-- Services
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Configuration Storage (persists during session)
+local Config = {
+    APIKey = "",
+    APIProvider = "OpenAI", -- OpenAI, OpenRouter, Custom
+    CustomEndpoint = "",
+    Enabled = false,
+    PersonalityEnabled = true,
+    Personality = "You are a friendly gamer. Keep responses short (1-2 sentences), casual, and fun. Use gaming slang occasionally.",
+    TriggerMode = "Mention", -- All, Mention, Keyword
+    TriggerKeywords = {},
+    ResponseDelay = {Min = 1, Max = 3},
+    ContextMemory = 10,
+    MaxTokens = 100,
+    Temperature = 0.8
+}
+
+-- Chat History for Context
+local ChatHistory = {}
+local ProcessingMessage = false
+
+-- HTTP Request Handler (supports multiple executors)
+local function HttpRequest(url, method, headers, body)
+    local success, response
+    
+    -- Try different HTTP methods based on executor
+    if syn and syn.request then
+        success, response = pcall(function()
+            return syn.request({
+                Url = url,
+                Method = method,
+                Headers = headers,
+                Body = body
+            })
+        end)
+    elseif http and http.request then
+        success, response = pcall(function()
+            return http.request({
+                Url = url,
+                Method = method,
+                Headers = headers,
+                Body = body
+            })
+        end)
+    elseif request then
+        success, response = pcall(function()
+            return request({
+                Url = url,
+                Method = method,
+                Headers = headers,
+                Body = body
+            })
+        end)
+    elseif http_request then
+        success, response = pcall(function()
+            return http_request({
+                Url = url,
+                Method = method,
+                Headers = headers,
+                Body = body
+            })
+        end)
+    elseif HttpService and HttpService.RequestAsync then
+        success, response = pcall(function()
+            return HttpService:RequestAsync({
+                Url = url,
+                Method = method,
+                Headers = headers,
+                Body = body
+            })
+        end)
+    else
+        return nil, "No HTTP method available"
+    end
+    
+    if success and response then
+        return response
+    else
+        return nil, response
+    end
+end
+
+-- Create Main GUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AICharBotGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
+
+-- Main Container (Draggable)
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 320, 0, 450)
+MainFrame.Position = UDim2.new(0.5, -160, 0.5, -225)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Visible = true
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 12)
+MainCorner.Parent = MainFrame
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Color3.fromRGB(100, 100, 255)
+MainStroke.Thickness = 2
+MainStroke.Parent = MainFrame
+
+-- Title Bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 40)
+TitleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = MainFrame
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 12)
+TitleCorner.Parent = TitleBar
+
+-- Fix title bar bottom corners
+local TitleFix = Instance.new("Frame")
+TitleFix.Size = UDim2.new(1, 0, 0, 12)
+TitleFix.Position = UDim2.new(0, 0, 1, -12)
+TitleFix.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+TitleFix.BorderSizePixel = 0
+TitleFix.Parent = TitleBar
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -80, 1, 0)
+TitleLabel.Position = UDim2.new(0, 15, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "🤖 AI Chat Bot"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleLabel.TextSize = 16
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = TitleBar
+
+-- Minimize Button
+local MinimizeBtn = Instance.new("TextButton")
+MinimizeBtn.Size = UDim2.new(0, 30, 0, 30)
+MinimizeBtn.Position = UDim2.new(1, -70, 0, 5)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
+MinimizeBtn.Text = "−"
+MinimizeBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+MinimizeBtn.TextSize = 20
+MinimizeBtn.Font = Enum.Font.GothamBold
+MinimizeBtn.Parent = TitleBar
+
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 6)
+MinCorner.Parent = MinimizeBtn
+
+-- Close Button
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -35, 0, 5)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+CloseBtn.Text = "×"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 20
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.Parent = TitleBar
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 6)
+CloseCorner.Parent = CloseBtn
+
+-- Content Container with Scroll
+local ContentScroll = Instance.new("ScrollingFrame")
+ContentScroll.Name = "Content"
+ContentScroll.Size = UDim2.new(1, -20, 1, -50)
+ContentScroll.Position = UDim2.new(0, 10, 0, 45)
+ContentScroll.BackgroundTransparency = 1
+ContentScroll.ScrollBarThickness = 4
+ContentScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 255)
+ContentScroll.CanvasSize = UDim2.new(0, 0, 0, 800)
+ContentScroll.Parent = MainFrame
+
+local ContentLayout = Instance.new("UIListLayout")
+ContentLayout.Padding = UDim.new(0, 10)
+ContentLayout.Parent = ContentScroll
+
+-- Helper function to create sections
+local function CreateSection(name, parent)
+    local section = Instance.new("Frame")
+    section.Name = name
+    section.Size = UDim2.new(1, 0, 0, 0)
+    section.AutomaticSize = Enum.AutomaticSize.Y
+    section.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    section.BorderSizePixel = 0
+    section.Parent = parent
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = section
+    
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 10)
+    padding.PaddingBottom = UDim.new(0, 10)
+    padding.PaddingLeft = UDim.new(0, 10)
+    padding.PaddingRight = UDim.new(0, 10)
+    padding.Parent = section
+    
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8)
+    layout.Parent = section
+    
+    return section
+end
+
+local function CreateLabel(text, parent)
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 0, 20)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = Color3.fromRGB(180, 180, 200)
+    label.TextSize = 12
+    label.Font = Enum.Font.Gotham
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = parent
+    return label
+end
+
+local function CreateTextBox(placeholder, parent, multiline)
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1, 0, 0, multiline and 60 or 32)
+    container.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    container.BorderSizePixel = 0
+    container.Parent = parent
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = container
+    
+    local textbox = Instance.new("TextBox")
+    textbox.Size = UDim2.new(1, -16, 1, -8)
+    textbox.Position = UDim2.new(0, 8, 0, 4)
+    textbox.BackgroundTransparency = 1
+    textbox.PlaceholderText = placeholder
+    textbox.PlaceholderColor3 = Color3.fromRGB(100, 100, 120)
+    textbox.Text = ""
+    textbox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    textbox.TextSize = 12
+    textbox.Font = Enum.Font.Gotham
+    textbox.TextXAlignment = Enum.TextXAlignment.Left
+    textbox.TextYAlignment = Enum.TextYAlignment.Top
+    textbox.ClearTextOnFocus = false
+    textbox.MultiLine = multiline or false
+    textbox.TextWrapped = true
+    textbox.Parent = container
+    
+    return textbox, container
+end
+
+local function CreateToggle(text, default, parent, callback)
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1, 0, 0, 28)
+    container.BackgroundTransparency = 1
+    container.Parent = parent
+    
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -50, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = Color3.fromRGB(220, 220, 240)
+    label.TextSize = 13
+    label.Font = Enum.Font.Gotham
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = container
+    
+    local toggleBg = Instance.new("Frame")
+    toggleBg.Size = UDim2.new(0, 44, 0, 22)
+    toggleBg.Position = UDim2.new(1, -44, 0.5, -11)
+    toggleBg.BackgroundColor3 = default and Color3.fromRGB(80, 200, 120) or Color3.fromRGB(60, 60, 80)
+    toggleBg.BorderSizePixel = 0
+    toggleBg.Parent = container
+    
+    local toggleCorner = Instance.new("UICorner")
+    toggleCorner.CornerRadius = UDim.new(1, 0)
+    toggleCorner.Parent = toggleBg
+    
+    local toggleCircle = Instance.new("Frame")
+    toggleCircle.Size = UDim2.new(0, 18, 0, 18)
+    toggleCircle.Position = default and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+    toggleCircle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    toggleCircle.BorderSizePixel = 0
+    toggleCircle.Parent = toggleBg
+    
+    local circleCorner = Instance.new("UICorner")
+    circleCorner.CornerRadius = UDim.new(1, 0)
+    circleCorner.Parent = toggleCircle
+    
+    local enabled = default
+    
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.Size = UDim2.new(1, 0, 1, 0)
+    toggleBtn.BackgroundTransparency = 1
+    toggleBtn.Text = ""
+    toggleBtn.Parent = toggleBg
+    
+    toggleBtn.MouseButton1Click:Connect(function()
+        enabled = not enabled
+        toggleBg.BackgroundColor3 = enabled and Color3.fromRGB(80, 200, 120) or Color3.fromRGB(60, 60, 80)
+        toggleCircle.Position = enabled and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+        if callback then callback(enabled) end
+    end)
+    
+    return {
+        SetEnabled = function(value)
+            enabled = value
+            toggleBg.BackgroundColor3 = enabled and Color3.fromRGB(80, 200, 120) or Color3.fromRGB(60, 60, 80)
+            toggleCircle.Position = enabled and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+        end,
+        GetEnabled = function() return enabled end
+    }
+end
+
+local function CreateDropdown(text, options, default, parent, callback)
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1, 0, 0, 55)
+    container.BackgroundTransparency = 1
+    container.ClipsDescendants = false
+    container.Parent = parent
+    
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 0, 20)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = Color3.fromRGB(180, 180, 200)
+    label.TextSize = 12
+    label.Font = Enum.Font.Gotham
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = container
+    
+    local dropdownBtn = Instance.new("TextButton")
+    dropdownBtn.Size = UDim2.new(1, 0, 0, 32)
+    dropdownBtn.Position = UDim2.new(0, 0, 0, 22)
+    dropdownBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    dropdownBtn.Text = "  " .. default .. "  ▼"
+    dropdownBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    dropdownBtn.TextSize = 12
+    dropdownBtn.Font = Enum.Font.Gotham
+    dropdownBtn.TextXAlignment = Enum.TextXAlignment.Left
+    dropdownBtn.Parent = container
+    
+    local dropCorner = Instance.new("UICorner")
+    dropCorner.CornerRadius = UDim.new(0, 6)
+    dropCorner.Parent = dropdownBtn
+    
+    local dropdownList = Instance.new("Frame")
+    dropdownList.Size = UDim2.new(1, 0, 0, #options * 28)
+    dropdownList.Position = UDim2.new(0, 0, 0, 56)
+    dropdownList.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+    dropdownList.BorderSizePixel = 0
+    dropdownList.Visible = false
+    dropdownList.ZIndex = 10
+    dropdownList.Parent = container
+    
+    local listCorner = Instance.new("UICorner")
+    listCorner.CornerRadius = UDim.new(0, 6)
+    listCorner.Parent = dropdownList
+    
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Parent = dropdownList
+    
+    local currentValue = default
+    
+    for _, option in ipairs(options) do
+        local optionBtn = Instance.new("TextButton")
+        optionBtn.Size = UDim2.new(1, 0, 0, 28)
+        optionBtn.BackgroundTransparency = 1
+        optionBtn.Text = "  " .. option
+        optionBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
+        optionBtn.TextSize = 12
+        optionBtn.Font = Enum.Font.Gotham
+        optionBtn.TextXAlignment = Enum.TextXAlignment.Left
+        optionBtn.ZIndex = 10
+        optionBtn.Parent = dropdownList
+        
+        optionBtn.MouseButton1Click:Connect(function()
+            currentValue = option
+            dropdownBtn.Text = "  " .. option .. "  ▼"
+            dropdownList.Visible = false
+            if callback then callback(option) end
+        end)
+    end
+    
+    dropdownBtn.MouseButton1Click:Connect(function()
+        dropdownList.Visible = not dropdownList.Visible
+    end)
+    
+    return {
+        GetValue = function() return currentValue end,
+        SetValue = function(value)
+            currentValue = value
+            dropdownBtn.Text = "  " .. value .. "  ▼"
+        end
+    }
+end
+
+local function CreateButton(text, parent, callback)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 32)
+    btn.BackgroundColor3 = Color3.fromRGB(80, 80, 200)
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 13
+    btn.Font = Enum.Font.GothamBold
+    btn.Parent = parent
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = btn
+    
+    btn.MouseButton1Click:Connect(callback)
+    return btn
+end
+
+-- ============ BUILD GUI SECTIONS ============
+
+-- Section 1: Master Toggle
+local MasterSection = CreateSection("MasterSection", ContentScroll)
+local MasterToggle = CreateToggle("🟢 Enable AI Chatbot", false, MasterSection, function(enabled)
+    Config.Enabled = enabled
+end)
+
+-- Section 2: API Settings
+local APISection = CreateSection("APISection", ContentScroll)
+CreateLabel("🔑 API Configuration", APISection)
+
+local APIProviderDropdown = CreateDropdown("Provider", {"OpenAI", "OpenRouter", "Groq", "Custom"}, "OpenAI", APISection, function(value)
+    Config.APIProvider = value
+end)
+
+local APIKeyBox = CreateTextBox("Enter your API key here...", APISection, false)
+APIKeyBox.FocusLost:Connect(function()
+    Config.APIKey = APIKeyBox.Text
+end)
+
+local CustomEndpointBox = CreateTextBox("Custom endpoint URL (if using Custom)", APISection, false)
+CustomEndpointBox.FocusLost:Connect(function()
+    Config.CustomEndpoint = CustomEndpointBox.Text
+end)
+
+-- Section 3: Personality Settings
+local PersonalitySection = CreateSection("PersonalitySection", ContentScroll)
+CreateLabel("🎭 Personality Settings", PersonalitySection)
+
+local PersonalityToggle = CreateToggle("Enable Personality", true, PersonalitySection, function(enabled)
+    Config.PersonalityEnabled = enabled
+end)
+
+local PersonalityBox = CreateTextBox("Describe how the AI should act...", PersonalitySection, true)
+PersonalityBox.Text = Config.Personality
+PersonalityBox.FocusLost:Connect(function()
+    Config.Personality = PersonalityBox.Text
+end)
+
+-- Personality Presets
+local PresetSection = CreateSection("PresetSection", ContentScroll)
+CreateLabel("📋 Personality Presets", PresetSection)
+
+local presets = {
+    {name = "Friendly Gamer", prompt = "You are a friendly gamer. Keep responses short (1-2 sentences), casual, and fun. Use gaming slang occasionally."},
+    {name = "Toxic Player", prompt = "You respond sarcastically and competitively. Short roasts and trash talk, but nothing actually offensive."},
+    {name = "Helpful Guide", prompt = "You're a helpful player who gives tips and encouragement. Keep responses brief and supportive."},
+    {name = "Silent Type", prompt = "You respond with very short answers (1-5 words max). Mysterious and cool."},
+    {name = "Hype Beast", prompt = "Everything is exciting! Use caps occasionally, lots of energy. LETS GO!"},
+}
+
+for _, preset in ipairs(presets) do
+    CreateButton(preset.name, PresetSection, function()
+        Config.Personality = preset.prompt
+        PersonalityBox.Text = preset.prompt
+    end)
+end
+
+-- Section 4: Trigger Settings
+local TriggerSection = CreateSection("TriggerSection", ContentScroll)
+CreateLabel("🎯 Response Triggers", TriggerSection)
+
+local TriggerDropdown = CreateDropdown("Trigger Mode", {"All Messages", "Mention Only", "Keywords"}, "Mention Only", TriggerSection, function(value)
+    local modeMap = {["All Messages"] = "All", ["Mention Only"] = "Mention", ["Keywords"] = "Keyword"}
+    Config.TriggerMode = modeMap[value] or "Mention"
+end)
+
+local KeywordsBox = CreateTextBox("Keywords (comma separated): hi, hello, hey", TriggerSection, false)
+KeywordsBox.FocusLost:Connect(function()
+    Config.TriggerKeywords = {}
+    for word in string.gmatch(KeywordsBox.Text, "[^,]+") do
+        table.insert(Config.TriggerKeywords, string.lower(string.match(word, "^%s*(.-)%s*$")))
+    end
+end)
+
+-- Section 5: Advanced Settings
+local AdvancedSection = CreateSection("AdvancedSection", ContentScroll)
+CreateLabel("⚙️ Advanced Settings", AdvancedSection)
+
+CreateLabel("Response Delay (seconds): Min-Max", AdvancedSection)
+local DelayContainer = Instance.new("Frame")
+DelayContainer.Size = UDim2.new(1, 0, 0, 32)
+DelayContainer.BackgroundTransparency = 1
+DelayContainer.Parent = AdvancedSection
+
+local MinDelayBox = CreateTextBox("1", DelayContainer, false)
+MinDelayBox.Parent.Size = UDim2.new(0.45, 0, 1, 0)
+MinDelayBox.Text = "1"
+MinDelayBox.FocusLost:Connect(function()
+    Config.ResponseDelay.Min = tonumber(MinDelayBox.Text) or 1
+end)
+
+local MaxDelayBox = CreateTextBox("3", DelayContainer, false)
+MaxDelayBox.Parent.Size = UDim2.new(0.45, 0, 1, 0)
+MaxDelayBox.Parent.Position = UDim2.new(0.55, 0, 0, 0)
+MaxDelayBox.Text = "3"
+MaxDelayBox.FocusLost:Connect(function()
+    Config.ResponseDelay.Max = tonumber(MaxDelayBox.Text) or 3
+end)
+
+CreateLabel("Context Memory (messages to remember)", AdvancedSection)
+local MemoryBox = CreateTextBox("10", AdvancedSection, false)
+MemoryBox.Text = "10"
+MemoryBox.FocusLost:Connect(function()
+    Config.ContextMemory = tonumber(MemoryBox.Text) or 10
+end)
+
+CreateLabel("Max Response Length (tokens)", AdvancedSection)
+local TokensBox = CreateTextBox("100", AdvancedSection, false)
+TokensBox.Text = "100"
+TokensBox.FocusLost:Connect(function()
+    Config.MaxTokens = tonumber(TokensBox.Text) or 100
+end)
+
+-- Section 6: Status & Actions
+local StatusSection = CreateSection("StatusSection", ContentScroll)
+CreateLabel("📊 Status", StatusSection)
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, 0, 0, 40)
+StatusLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+StatusLabel.Text = "Status: Idle\nMessages Processed: 0"
+StatusLabel.TextColor3 = Color3.fromRGB(150, 255, 150)
+StatusLabel.TextSize = 11
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextWrapped = true
+StatusLabel.Parent = StatusSection
+
+local StatusCorner = Instance.new("UICorner")
+StatusCorner.CornerRadius = UDim.new(0, 6)
+StatusCorner.Parent = StatusLabel
+
+local MessagesProcessed = 0
+
+CreateButton("🗑️ Clear Chat History", StatusSection, function()
+    ChatHistory = {}
+    StatusLabel.Text = "Status: History Cleared\nMessages Processed: " .. MessagesProcessed
+end)
+
+CreateButton("🧪 Test API Connection", StatusSection, function()
+    StatusLabel.Text = "Status: Testing API...\nMessages Processed: " .. MessagesProcessed
+    task.spawn(function()
+        local success, result = pcall(function()
+            return GenerateResponse("Say 'API working!' in 3 words or less.")
+        end)
+        if success and result then
+            StatusLabel.Text = "Status: ✅ API Working!\nTest: " .. result:sub(1, 30)
+        else
+            StatusLabel.Text = "Status: ❌ API Error\n" .. tostring(result):sub(1, 40)
+        end
+    end)
+end)
+
+-- ============ MOBILE TOGGLE BUTTON ============
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Name = "ToggleButton"
+ToggleButton.Size = UDim2.new(0, 50, 0, 50)
+ToggleButton.Position = UDim2.new(0, 10, 0.5, -25)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(80, 80, 200)
+ToggleButton.Text = "🤖"
+ToggleButton.TextSize = 24
+ToggleButton.Font = Enum.Font.GothamBold
+ToggleButton.Parent = ScreenGui
+
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(1, 0)
+ToggleCorner.Parent = ToggleButton
+
+-- ============ DRAGGING FUNCTIONALITY ============
+local function MakeDraggable(frame, handle)
+    local dragging = false
+    local dragInput, dragStart, startPos
+    
+    handle = handle or frame
+    
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    
+    handle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+MakeDraggable(MainFrame, TitleBar)
+MakeDraggable(ToggleButton)
+
+-- ============ GUI CONTROLS ============
+local minimized = false
+
+MinimizeBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    if minimized then
+        MainFrame.Size = UDim2.new(0, 320, 0, 40)
+        ContentScroll.Visible = false
+        MinimizeBtn.Text = "+"
+    else
+        MainFrame.Size = UDim2.new(0, 320, 0, 450)
+        ContentScroll.Visible = true
+        MinimizeBtn.Text = "−"
+    end
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = false
+end)
+
+ToggleButton.MouseButton1Click:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
+-- ============ AI RESPONSE GENERATION ============
+function GenerateResponse(userMessage)
+    if Config.APIKey == "" then
+        return nil, "No API key configured"
+    end
+    
+    -- Build messages array with context
+    local messages = {}
+    
+    -- System prompt with personality
+    if Config.PersonalityEnabled and Config.Personality ~= "" then
+        table.insert(messages, {
+            role = "system",
+            content = Config.Personality .. "\n\nYou are responding in a Roblox game chat. Keep responses short and chat-appropriate. Your name is " .. LocalPlayer.Name .. "."
+        })
+    else
+        table.insert(messages, {
+            role = "system",
+            content = "You are responding in a Roblox game chat as " .. LocalPlayer.Name .. ". Keep responses very short (1-2 sentences max)."
+        })
+    end
+    
+    -- Add chat history for context
+    local historyStart = math.max(1, #ChatHistory - Config.ContextMemory + 1)
+    for i = historyStart, #ChatHistory do
+        table.insert(messages, ChatHistory[i])
+    end
+    
+    -- Add current message
+    table.insert(messages, {role = "user", content = userMessage})
+    
+    -- Determine endpoint and headers based on provider
+    local endpoint, headers
+    
+    if Config.APIProvider == "OpenAI" then
+        endpoint = "[api.openai.com](https://api.openai.com/v1/chat/completions)"
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["Authorization"] = "Bearer " .. Config.APIKey
+        }
+    elseif Config.APIProvider == "OpenRouter" then
+        endpoint = "[openrouter.ai](https://openrouter.ai/api/v1/chat/completions)"
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["Authorization"] = "Bearer " .. Config.APIKey,
+            ["HTTP-Referer"] = "[roblox.com](https://roblox.com)",
+            ["X-Title"] = "Roblox AI Chatbot"
+        }
+    elseif Config.APIProvider == "Groq" then
+        endpoint = "[api.groq.com](https://api.groq.com/openai/v1/chat/completions)"
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["Authorization"] = "Bearer " .. Config.APIKey
+        }
+    elseif Config.APIProvider == "Custom" then
+        endpoint = Config.CustomEndpoint
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["Authorization"] = "Bearer " .. Config.APIKey
+        }
+    end
+    
+    local body = HttpService:JSONEncode({
+        model = Config.APIProvider == "OpenRouter" and "openai/gpt-3.5-turbo" or 
+                Config.APIProvider == "Groq" and "llama3-8b-8192" or "gpt-3.5-turbo",
+        messages = messages,
+        max_tokens = Config.MaxTokens,
+        temperature = Config.Temperature
+    })
+    
+    local response, err = HttpRequest(endpoint, "POST", headers, body)
+    
+    if response and response.Body then
+        local success, data = pcall(function()
+            return HttpService:JSONDecode(response.Body)
+        end)
+        
+        if success and data.choices and data.choices[1] then
+            local reply = data.choices[1].message.content
+            
+            -- Store in history
+            table.insert(ChatHistory, {role = "user", content = userMessage})
+            table.insert(ChatHistory, {role = "assistant", content = reply})
+            
+            -- Trim history if too long
+            while #ChatHistory > Config.ContextMemory * 2 do
+                table.remove(ChatHistory, 1)
+            end
+            
+            return reply
+        else
+            return nil, "Failed to parse response: " .. tostring(data and data.error and data.error.message or "Unknown error")
+        end
+    else
+        return nil, "HTTP request failed: " .. tostring(err)
+    end
+end
+
+-- ============ CHAT HANDLING ============
+local function ShouldRespond(playerName, message)
+    if playerName == LocalPlayer.Name then return false end
+    if not Config.Enabled then return false end
+    
+    local lowerMsg = string.lower(message)
+    local myName = string.lower(LocalPlayer.Name)
+    
+    if Config.TriggerMode == "All" then
+        return true
+    elseif Config.TriggerMode == "Mention" then
+        -- Check if mentioned by name or display name
+        return string.find(lowerMsg, myName) or 
+               string.find(lowerMsg, string.lower(LocalPlayer.DisplayName))
+    elseif Config.TriggerMode == "Keyword" then
+        for _, keyword in ipairs(Config.TriggerKeywords) do
+            if string.find(lowerMsg, keyword) then
+                return true
+            end
+        end
+        return false
+    end
+    
+    return false
+end
+
+local function SendChatMessage(message)
+    -- Try different chat methods
+    local success = false
+    
+    -- Method 1: TextChatService (modern)
+    local TextChatService = game:GetService("TextChatService")
+    local channels = TextChatService:FindFirstChild("TextChannels")
+    if channels then
+        local rbxGeneral = channels:FindFirstChild("RBXGeneral")
+        if rbxGeneral then
+            pcall(function()
+                rbxGeneral:SendAsync(message)
+                success = true
+            end)
+        end
+    end
+    
+    -- Method 2: Legacy chat
+    if not success then
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        local chatRemote = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+        if chatRemote then
+            local sayEvent = chatRemote:FindFirstChild("SayMessageRequest")
+            if sayEvent then
+                pcall(function()
+                    sayEvent:FireServer(message, "All")
+                    success = true
+                end)
+            end
+        end
+    end
+    
+    -- Method 3: Direct chat
+    if not success then
+        pcall(function()
+            game:GetService("Chat"):Chat(LocalPlayer.Character, message)
+        end)
+    end
+end
+
+local function ProcessChat(playerName, message)
+    if ProcessingMessage then return end
+    if not ShouldRespond(playerName, message) then return end
+    
+    ProcessingMessage = true
+    StatusLabel.Text = "Status: Processing...\nFrom: " .. playerName
+    
+    task.spawn(function()
+        -- Random delay for natural feel
+        local delay = Config.ResponseDelay.Min + math.random() * (Config.ResponseDelay.Max - Config.ResponseDelay.Min)
+        task.wait(delay)
+        
+        local contextMessage = playerName .. " said: " .. message
+        local response, err = GenerateResponse(contextMessage)
+        
+        if response then
+            -- Clean up response for chat
+            response = response:gsub("\n", " "):gsub("%s+", " "):sub(1, 200)
+            SendChatMessage(response)
+            MessagesProcessed = MessagesProcessed + 1
+            StatusLabel.Text = "Status: ✅ Responded\nMessages: " .. MessagesProcessed
+        else
+            StatusLabel.Text = "Status: ❌ Error\n" .. tostring(err):sub(1, 40)
+        end
+        
+        ProcessingMessage = false
+    end)
+end
+
+-- ============ CONNECT CHAT LISTENERS ============
+
+-- Modern TextChatService
+local TextChatService = game:GetService("TextChatService")
+if TextChatService then
+    TextChatService.MessageReceived:Connect(function(textChatMessage)
+        if textChatMessage.TextSource then
+            local player = Players:GetPlayerByUserId(textChatMessage.TextSource.UserId)
+            if player then
+                ProcessChat(player.Name, textChatMessage.Text)
+            end
+        end
+    end)
+end
+
+-- Legacy chat system
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then
+        player.Chatted:Connect(function(message)
+            ProcessChat(player.Name, message)
+        end)
+    end
+end
+
+Players.PlayerAdded:Connect(function(player)
+    player.Chatted:Connect(function(message)
+        ProcessChat(player.Name, message)
+    end)
+end)
+
+-- ============ INITIALIZATION ============
+print("AI Chatbot loaded!")
+print("- Click the 🤖 button to toggle GUI")
+print("- Enter your API key in the GUI")
+print("- Enable the chatbot with the master toggle")
+StatusLabel.Text = "Status: Ready\nEnter API key to begin"
